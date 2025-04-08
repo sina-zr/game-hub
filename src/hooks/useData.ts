@@ -2,37 +2,67 @@ import { useEffect, useState } from "react";
 import apiClient from "../services/api-client";
 import { AxiosRequestConfig, CanceledError } from "axios";
 
-interface FetchResponse<T> {
-  count: number;
-  results: T[];
+interface CacheEntry<T> {
+  timestamp: number;
+  data: T[];
 }
 
-export default function useData<T>(endpoint: string, requestConfig?: AxiosRequestConfig, deps?: any) {
+const CACHE_TTL = 1000 * 60 * 60 * 24; // 24 hours
+
+function useData<T>(endpoint: string, requestConfig?: AxiosRequestConfig, deps: any[] = [], shouldCache: boolean = false) {
   const [data, setData] = useState<T[]>();
   const [errors, setErrors] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(
-    () => {
-      const controller = new AbortController();
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const loadData = async () => {
+      if (shouldCache) {
+        const cached = localStorage.getItem(endpoint);
+        if (cached) {
+          const parsed: CacheEntry<T> = JSON.parse(cached);
+          const isExpired = Date.now() - parsed.timestamp > CACHE_TTL;
+
+          if (!isExpired) {
+            setData(parsed.data);
+            setIsLoading(false);
+            return;
+          } else {
+            localStorage.removeItem(endpoint);
+          }
+        }
+      }
 
       setIsLoading(true);
-      apiClient
-        .get<FetchResponse<T>>(endpoint, { signal: controller.signal, ...requestConfig })
-        .then((res) => {
-          setData(res.data.results);
-          setIsLoading(false);
-        })
-        .catch((err) => {
-          setIsLoading(false);
-          if (err instanceof CanceledError) return;
-          setErrors(err.message);
+      try {
+        const res = await apiClient.get(endpoint, {
+          signal: controller.signal,
+          ...requestConfig,
         });
 
-      return () => controller.abort();
-    },
-    deps ? [...deps] : []
-  );
+        setData(res.data.results);
+        if (shouldCache) {
+          const cacheEntry: CacheEntry<T> = {
+            timestamp: Date.now(),
+            data: res.data.results,
+          };
+          localStorage.setItem(endpoint, JSON.stringify(cacheEntry));
+        }
+      } catch (err: any) {
+        if (err instanceof CanceledError) return;
+        setErrors([err.message]);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadData();
+
+    return () => controller.abort();
+  }, deps);
 
   return { data, errors, isLoading };
 }
+
+export default useData;
